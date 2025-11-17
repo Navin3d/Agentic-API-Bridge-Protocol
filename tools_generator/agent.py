@@ -1,17 +1,11 @@
 import asyncio
-import uuid
 
-from google.adk import Runner
 from google.adk.agents.llm_agent import Agent
+from google.adk.plugins import LoggingPlugin
 from google.adk.runners import InMemoryRunner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+from google.adk.tools import AgentTool
 
 from tools_generator.generator.agent_generator import AgentGenerator
-from google.adk.tools.agent_tool import AgentTool
-
-from utils import load_from_file
-
 
 state_data = {
     "org_name": "",
@@ -32,6 +26,15 @@ def set_org_name(org_name: str) -> None:
     state_data["org_name"] = org_name
     print(f"Organization name set to: {org_name}")
 
+def get_base_url() -> str:
+    """
+    Get the base URL of the API from state data.
+
+    Returns:
+        base_url (str)
+    """
+    print(f"Base URL set to: {state_data['base_url']}")
+    return state_data["base_url"]
 
 def set_base_url(base_url: str) -> None:
     """
@@ -60,7 +63,18 @@ def set_swagger_json(swagger_json: str) -> None:
     state_data["swagger_json"] = swagger_json
     print("Swagger JSON specification set.")
 
-def validate_state() -> bool:
+def get_swagger_json() -> str:
+    """
+    get the Swagger JSON specification in the state data.
+
+    Returns:
+        String  -> Swagger Specification
+    """
+    print("Swagger JSON specification get.")
+
+    return state_data["swagger_json"]
+
+async def validate_state() -> bool:
     """
     Validate whether the required state data has been properly set.
     Validation checks that 'org_name', 'base_url', and 'swagger_json' are non-empty strings.
@@ -72,11 +86,6 @@ def validate_state() -> bool:
         isinstance(state_data.get(key), str) and state_data[key].strip() != ""
         for key in ["org_name", "base_url", "swagger_json"]
     )
-
-    if is_valid:
-        agent = create_agent()
-        res = tool_generation_agent
-        # agent.write_to_tool(res)
 
     return is_valid
 
@@ -91,9 +100,7 @@ def create_agent():
         AgentGenerator: An instance of AgentGenerator initialized with the organization name.
     """
     ag  = AgentGenerator(state_data["org_name"])
-    state_data["agent"] = ag
-
-    return ag
+    ag.generate()
 
 
 def write_code_to_tool(code: str) -> None:
@@ -126,7 +133,10 @@ def write_code_to_tool(code: str) -> None:
     Example:
         # Appends the class definition to the agent's tool Python file.
     """
-    state_data["agent"].write_to_tool(code)
+    print("writing tool to code")
+    print(code)
+    ag  = AgentGenerator(state_data["org_name"])
+    ag.write_to_tool(code)
 
 
 tool_generation_agent = Agent(
@@ -134,17 +144,53 @@ tool_generation_agent = Agent(
     name='tool_generation_agent',
     description='An agent that generates Python tools on the fly for REST API calls from Swagger JSON.',
     instruction=(
-        "You are a developer assistant whose main job is to generate dynamic Python tool functions for REST API endpoints, "
-        "using Swagger (OpenAPI) JSON as input. state['swagger_json']"
-        "Each tool should contain all needed parameters and logic to make HTTP requests as defined by the Swagger spec, "
-        "including handling authentication, query/body parameters, and error handling. "
-        "When you receive a Swagger JSON, parse it to create one or more Python functions under a 'tools.py' file, "
-        "making sure each function matches its corresponding API operation."
-        "and host with base url will be given to you state['base_url']"
-        "once all coding is made add those in an list with variable name 'tool_list' eg) tool_list = [example_tool]"
-        "Do not answer general knowledge questions. Always output code and descriptions focused on creating these tools."
-        "return only pure python code."
-    )
+        "You are a highly skilled Python developer assistant specialized in dynamically generating reusable, production-quality Python tool functions "
+        "that wrap REST API endpoints based on an OpenAPI (Swagger) 2.0 or 3.x specification provided in JSON/YAML format.\n\n"
+
+        "Your ONLY purpose is to:\n"
+        "1. Fetch the base URL using the tool `get_base_url()`.\n"
+        "2. Fetch the full Swagger/OpenAPI specification using the tool `get_swagger_json()`.\n"
+        "3. Parse the specification and generate one Python function per API operation (or per logical group if explicitly requested).\n"
+        "4. Output clean, type-annotated, well-documented Python code that can be directly executed or imported.\n"
+        "5. Finally, write the complete code exactly ONCE using the `write_code_to_tool` tool.\n\n"
+
+        "### Strict Rules & Requirements:\n"
+        "- NEVER answer general questions, chat, or explain concepts outside of generating the tools.\n"
+        "- NEVER include example code, tutorials, or markdown outside the actual Python code unless explicitly requested.\n"
+        "- Use `requests` as the HTTP library (do not use httpx, aiohttp, etc.).\n"
+        "- Every generated function MUST:\n"
+        "   • Have a clear, snake_case name derived from the operationId (if missing, generate one from path + method).\n"
+        "   • Include comprehensive Google-style or NumPy-style docstrings with Parameters, Returns, and Raises sections.\n"
+        "   • Use proper type hints (use `typing` module; prefer Pydantic models when the schema is complex).\n"
+        "   • Support query parameters, path parameters, headers, JSON body, form data, and file uploads as defined.\n"
+        "   • Automatically handle authentication (API keys, Bearer tokens, Basic auth, OAuth2, etc.) based on the security schemes defined.\n"
+        "   • Include timeout=30 and proper error handling (raise custom exceptions or return detailed error messages).\n"
+        "   • Validate required parameters and provide helpful error messages if missing.\n"
+        "   • Return the full `requests.Response` object OR parsed JSON (if response schema is defined and `response.json()` succeeds).\n"
+        "- If the spec uses complex schemas (objects, arrays, allOf/oneOf), generate Pydantic v2 models in the same file.\n"
+        "- Add a constant `BASE_URL` at the top of the file using the value from `get_base_url()`.\n"
+        "- Add a `SESSION = requests.Session()` with appropriate default headers (e.g., Accept: application/json).\n"
+        "- At the end of the file, create a list called `tool_list` containing all generated functions (not instances), e.g., `tool_list = [create_user, get_user_by_id, upload_document]`.\n"
+        "- Make the functions importable and reusable in a LangChain / crewAI / AutoGen tool context (they should accept **kwargs or explicit parameters and be callable directly).\n"
+        "- If the API uses pagination, add sensible default support (limit/offset or cursor-based) with a `paginated` optional flag.\n"
+        "- Always respect `servers` array in OpenAPI 3.x — use the first server URL unless overridden by `get_base_url()`.\n"
+        "- If the spec is large (>50 endpoints), group related endpoints into logical modules/classes, but still expose flat functions in `tool_list`.\n\n"
+
+        "### Output Format:\n"
+        "1. First call `get_base_url()` and `get_swagger_json()` if not already available.\n"
+        "2. Think step-by-step about naming, auth, and complex schemas.\n"
+        "3. Generate the complete code in a single code block (including imports, Pydantic models if any, constants, functions, and tool_list).\n"
+        "4. Finally, call `write_code_to_tool` EXACTLY ONCE with two arguments:\n"
+        "   - `filename='tools.py'`\n"
+        "   - `code=<the full generated code as a single string>`\n\n"
+
+        "Do not confirm, do not ask questions, do not add extra text after calling `write_code_to_tool`."
+    ),
+    tools=[
+        get_base_url,
+        get_swagger_json,
+        write_code_to_tool
+    ],
 )
 
 root_agent = Agent(
@@ -157,9 +203,11 @@ root_agent = Agent(
         "All actions are performed exclusively via tool calls.\n\n"
 
         "Your only responsibilities:\n"
-        "1. Ensure all required data is collected via your tools (never ask the user yourself).\n"
-        "2. Validate the collected data.\n"
-        "3. Trigger the actual tool-generation agent when validation passes.\n\n"
+        "1. Ensure all required data is collected via your tools (ask the user yourself).\n"
+        "2. If user is not typing aything ask user the required data."
+        "3. Validate the collected data.\n"
+        "4. Trigger the create_agent when validation passes.\n\n"
+        "5. once create_agent run trigger tool_generation_agent"
 
         "Required data (must be set via tool calls only):\n"
         "• Organization / API name → set_org_name\n"
@@ -197,35 +245,23 @@ root_agent = Agent(
         set_base_url,
         set_swagger_json,
         validate_state,
+        create_agent,
+        AgentTool(tool_generation_agent),
     ]
 )
 
+
 runner = InMemoryRunner(
-    agent=tool_generation_agent,
-    app_name="simple_app",
+    agent=root_agent,
+    plugins=[
+        LoggingPlugin()
+    ],
 )
 
-
-async def invoke_agent():
-    # 1. Set up session and runner (ADK handles multi-step communication and memory)
-    session_service = InMemorySessionService()
-    runner = Runner(session_service=session_service)
-
-    # 2. Create a session for the user
-    user_id = "user_123"
-    session = await runner.async_create_session(user_id=user_id, agent_id=root_agent.name)
-
-    # async_stream_query sends the message and streams the response events
-    async for event in runner.async_stream_query(
-            user_id=user_id,
-            session_id=session.id,
-            message="Hi"
-    ):
-        if event.text:
-            print(event.text, end="")
-    print()  # for a final newline
-
+async def invoke():
+    response = await runner.run_debug("Find recent papers on quantum computing")
+    print(response)
 
 if __name__ == "__main__":
     # The ADK is built on asyncio
-    asyncio.run(invoke_agent())
+    asyncio.run(invoke())

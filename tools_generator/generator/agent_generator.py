@@ -8,6 +8,7 @@ class AgentGenerator:
         self.project_dir = os.path.join(self.path, self.project)
         self.venv_dir = os.path.join(self.project_dir, "venv")
 
+    def generate(self):
         self.create_venv()
         self.install_dependencies()
         self.create_agent()
