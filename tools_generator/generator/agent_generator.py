@@ -99,6 +99,10 @@ tool_list = [example_tool]
                 f.write(tool_code)
             print(f"Created tool file at {tools_path}")
 
+    def read_tool(self):
+        tools_path = os.path.join(self.project_dir, self.project, "tools.py")
+        with open(tools_path, "r") as f:
+            return f.read()
 
     def map_tool_with_agent(self):
         agent_path = os.path.join(self.project_dir, self.project, "agent.py")

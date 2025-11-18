@@ -101,41 +101,69 @@ def create_agent():
     ag.generate()
 
 
-def write_code_to_tool(code: str) -> None:
+def write_code_to_tool(code: str, org_name: str = state_data["org_name"]) -> None:
     """
     Writes (appends) the provided Python code string to the dynamically generated
-    API tool file of the current agent.
+    API tool file associated with the specified organization.
 
-    This function is intended to be used by the tool-generation pipeline after
-    the Swagger/OpenAPI specification has been fully processed and validated.
-    It delegates the actual file write operation to the active agent instance
-    stored in the shared state.
+    This function is used by the tool-generation pipeline after the
+    Swagger/OpenAPI specification has been processed and validated.
+    It delegates the file write operation to an `AgentGenerator` instance
+    tied to the given organization.
 
     Args:
-        code (str):
-            The complete or incremental Python code (usually a class definition,
-            function, or helper) that should be appended to the agent's tool file.
-            The string must be valid Python syntax and properly indented.
+        code (str): The complete or incremental Python code (such as a class
+            definition, function, or helper) to append to the agent's tool file.
+            The content must be valid Python code and properly indented.
+        org_name (str): The name of the organization whose agent tool file should
+            be updated.
 
     Returns:
         None
 
     Raises:
-        KeyError: If ``state_data["agent"]`` is not set (i.e., no agent has been
-                  created or loaded yet).
-        AttributeError: If the agent object stored in state does not implement
-                        the ``write_to_tool`` method.
-        OSError: Propagated from the underlying file I/O operation performed by
-                 ``agent.write_to_tool``.
+        AttributeError: If the `AgentGenerator` instance does not implement
+            the `write_to_tool` method.
+        OSError: If an error occurs during the file I/O operation.
 
     Example:
-        # Appends the class definition to the agent's tool Python file.
+        # Append new Python code to the tool file for a specific organization.
+        write_code_to_tool(generated_code, "my_org")
     """
     print("writing tool to code")
     print(code)
-    ag  = AgentGenerator(state_data["org_name"])
+    ag = AgentGenerator(org_name)
     written = ag.write_to_tool(code)
-    ag.start_application()
+
+def read_code_from_tool(org_name: str) -> None:
+    """
+    Reads and returns the Python code from the dynamically generated
+    API tool file associated with the given organization.
+
+    This function is used by the tool-generation or inspection
+    pipeline to retrieve the existing tool code for a specific agent,
+    identified by the provided organization name.
+
+    Args:
+        org_name (str): The name of the organization whose agent tool
+            code should be read.
+
+    Returns:
+        str: The Python code content read from the agent's tool file.
+
+    Raises:
+        OSError: If an error occurs while reading from the tool file.
+        AttributeError: If the ``AgentGenerator`` instance does not
+            implement the ``read_tool`` method.
+
+    Example:
+        # Read the dynamically generated tool code for a specific organization.
+        code_from_tool = read_code_from_tool("my_org")
+    """
+    print("Reading tool to code")
+    ag = AgentGenerator(org_name)
+    code_from_tool = ag.read_tool()
+    return code_from_tool
 
 
 tool_generation_agent = Agent(
@@ -192,9 +220,47 @@ tool_generation_agent = Agent(
     ],
 )
 
-root_agent = Agent(
+tool_manipulation_agent = Agent(
     model='gemini-2.5-flash',
-    name='root_agent',
+    name='tool_manipulation_agent',
+    description=(
+        "An agent that reads the existing `tools.py` file containing dynamically generated Python tool functions "
+        "and manipulates, updates, or extends those tools according to user requests."
+    ),
+    instruction=(
+        """
+        You are an advanced Python developer assistant specialized in modifying, extending, and refactoring Python tool code (functions, classes, docstrings, constants, Pydantic models) in an existing tools.py file generated from a Swagger/OpenAPI specification.
+        Your main tasks:        
+        Read the current contents of tools.py exactly using the read_code_from_tool(org_name) tool, where org_name is passed explicitly.        
+        Apply user-specific requests strictly to the contents (e.g., add, update, delete functions/models, refactor code, fix bugs, enhance features, reorganize code, etc.).        
+        Output the revised, complete code ONCE using the write_code_to_tool(code, org_name) tool—code as the updated string, org_name as the required second argument.        
+        Rules:
+        Only work with the actual code in tools.py as returned by read_code_from_tool(org_name); do not use cached or previous versions.        
+        NEVER include example code or explanations outside the code unless explicitly instructed.        
+        Always preserve import statements and required constants unless a change is requested.        
+        Document changes clearly within code (docstrings, comments) if modifying logic, unless user prefers code-only updates.        
+        If user asks to extract, analyze, or summarize tools/functions/classes, output results in plain text (not code), otherwise always update tools.py.        
+        Do NOT answer general questions or explain Python concepts unless explicitly requested.        
+        All final code output MUST use proper formatting, type hints, and maintain code quality.        
+        After manipulating the code, call write_code_to_tool(code, org_name) EXACTLY ONCE with the updated code string and org_name.        
+        Do not confirm, do not ask questions, do not add extra explanations after calling write_code_to_tool.        
+        Output Format:
+        Read latest code using read_code_from_tool(org_name)        
+        Manipulate (add, update, remove, refactor) code as per user instructions        
+        Output new code in a single code block        
+        Call write_code_to_tool(code, org_name) EXACTLY ONCE with the updated code        
+        Do not confirm, do not ask questions, do not add extra explanations after calling write_code_to_tool.
+        """
+    ),
+    tools=[
+        read_code_from_tool,
+        write_code_to_tool,
+    ],
+)
+
+onboarding_agent = Agent(
+    model='gemini-2.5-flash',
+    name='onboarding_agent',
     description='Strict orchestrator for dynamic REST API tool generation from Swagger/OpenAPI specs.',
     instruction=(
         "You are a STRICT orchestrator agent. "
@@ -248,3 +314,29 @@ root_agent = Agent(
         AgentTool(tool_generation_agent),
     ]
 )
+
+
+root_agent = Agent(
+    model='gemini-2.5-flash',
+    name='root_agent',
+    description="A master agent that routes user queries to either onboarding or tool manipulation agents.",
+    instruction=(
+        "Your only job is to delegate each user query to exactly one appropriate specialist agent:\n\n"
+        "1. If the user request relates to onboarding processes (setup, credentials, service registration, environment initialization, getting started, or similar), forward the query to `onboarding_agent`.\n"
+        "2. If the user request involves updating, editing, refactoring, extending, fixing bugs in, or otherwise manipulating an EXISTING `tools.py` (add/remove/edit functions/models/auth, etc.), forward the query to `tool_manipulation_agent`.\n\n"
+        "### STRICT RULES:\n"
+        "- Never process the request yourself—route it intact, without rewriting or answering.\n"
+        "- Never explain your choice—only delegate.\n"
+        "- Do NOT attempt generation of fresh tool code from a Swagger or OpenAPI spec (ignore such requests entirely).\n"
+        "- Never create new agents or change the routing.\n"
+        "- Only use `onboarding_agent` or `tool_manipulation_agent`.\n"
+        "- Always forward the full, original user query as-is.\n\n"
+        "### Output Format:\n"
+        "- Simply delegate (pass along) the user's query to the correct agent, unmodified."
+    ),
+    sub_agents=[
+        onboarding_agent,
+        tool_manipulation_agent,
+    ],
+)
+
